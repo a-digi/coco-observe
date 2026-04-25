@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,17 +37,21 @@ type Agent struct {
 	RegisteredAt time.Time
 	LastSeenAt   *time.Time
 	Enabled      bool
+	BinaryAmd64  string // path to stored per-agent linux/amd64 binary, empty until generated
+	BinaryArm64  string // path to stored per-agent linux/arm64 binary, empty until generated
+	ProcessesJSON string // JSON array of {name} targets
+	TrackOS      bool   // whether the agent collects host OS metrics
 }
 
-// Batch is a stored metric batch row.
+// Batch is a stored metric batch row returned by queries.
 type Batch struct {
-	ID         int64
-	AgentID    string
-	CapturedAt time.Time
-	ReceivedAt time.Time
-	Sequence   int64
-	Buffered   bool
-	Payload    string // raw JSON
+	ID         int64           `json:"id"`
+	AgentID    string          `json:"agent_id"`
+	CapturedAt time.Time       `json:"captured_at"`
+	ReceivedAt time.Time       `json:"received_at"`
+	Sequence   int64           `json:"sequence"`
+	Buffered   bool            `json:"buffered"`
+	Payload    json.RawMessage `json:"payload"`
 }
 
 // Open opens (or creates) the hot database at dataDir/observe-hot.db.
@@ -74,7 +79,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // CreateAgent generates credentials, inserts the agent record, and returns
 // it with APISecretRaw populated (the only time the plaintext secret is available).
-func (s *Store) CreateAgent(name string) (*Agent, error) {
+func (s *Store) CreateAgent(name, processesJSON string, trackOS bool) (*Agent, error) {
 	key, err := randomHex(16)
 	if err != nil {
 		return nil, err
@@ -84,55 +89,89 @@ func (s *Store) CreateAgent(name string) (*Agent, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	if processesJSON == "" || processesJSON == "null" {
+		processesJSON = "[]"
+	}
 
 	_, err = s.db.Exec(
-		`INSERT INTO agents (id, name, api_key, api_secret, registered_at, enabled)
-		 VALUES (?, ?, ?, ?, ?, 1)`,
-		key, name, key, secret, now.Format(time.RFC3339),
+		`INSERT INTO agents (id, name, api_key, api_secret, registered_at, enabled, processes, track_os)
+		 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+		key, name, key, secret, now.Format(time.RFC3339), processesJSON, boolToInt(trackOS),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: create agent: %w", err)
 	}
 	return &Agent{
-		ID:           key,
-		Name:         name,
-		APIKey:       key,
-		APISecretRaw: secret,
-		RegisteredAt: now,
-		Enabled:      true,
+		ID:            key,
+		Name:          name,
+		APIKey:        key,
+		APISecretRaw:  secret,
+		RegisteredAt:  now,
+		Enabled:       true,
+		ProcessesJSON: processesJSON,
+		TrackOS:       trackOS,
 	}, nil
+}
+
+// AgentByID returns the agent and its raw API secret by agent ID, or sql.ErrNoRows.
+func (s *Store) AgentByID(id string) (*Agent, string, error) {
+	row := s.db.QueryRow(
+		`SELECT id, name, api_key, api_secret, registered_at, last_seen_at, enabled,
+		        COALESCE(binary_amd64,''), COALESCE(binary_arm64,''),
+		        COALESCE(processes,'[]'), COALESCE(track_os,1)
+		 FROM agents WHERE id = ?`, id)
+	return scanAgent(row)
 }
 
 // AgentByKey returns the agent and its raw API secret, or sql.ErrNoRows.
 func (s *Store) AgentByKey(apiKey string) (*Agent, string, error) {
 	row := s.db.QueryRow(
-		`SELECT id, name, api_key, api_secret, registered_at, last_seen_at, enabled
+		`SELECT id, name, api_key, api_secret, registered_at, last_seen_at, enabled,
+		        COALESCE(binary_amd64,''), COALESCE(binary_arm64,''),
+		        COALESCE(processes,'[]'), COALESCE(track_os,1)
 		 FROM agents WHERE api_key = ?`, apiKey)
+	return scanAgent(row)
+}
+
+// SetAgentBinaries stores the paths of the pre-generated per-agent binaries.
+func (s *Store) SetAgentBinaries(id, amd64Path, arm64Path string) error {
+	_, err := s.db.Exec(
+		`UPDATE agents SET binary_amd64 = ?, binary_arm64 = ? WHERE id = ?`,
+		amd64Path, arm64Path, id)
+	return err
+}
+
+func scanAgent(row interface{ Scan(...any) error }) (*Agent, string, error) {
 	var (
 		a           Agent
-		secretHash  string
+		rawSecret   string
 		registeredS string
 		lastSeenS   *string
 		enabledInt  int
+		trackOSInt  int
 	)
-	err := row.Scan(&a.ID, &a.Name, &a.APIKey, &secretHash,
-		&registeredS, &lastSeenS, &enabledInt)
-	if err != nil {
+	if err := row.Scan(&a.ID, &a.Name, &a.APIKey, &rawSecret,
+		&registeredS, &lastSeenS, &enabledInt,
+		&a.BinaryAmd64, &a.BinaryArm64,
+		&a.ProcessesJSON, &trackOSInt); err != nil {
 		return nil, "", err
 	}
 	a.RegisteredAt, _ = time.Parse(time.RFC3339, registeredS)
 	a.Enabled = enabledInt == 1
+	a.TrackOS = trackOSInt == 1
 	if lastSeenS != nil {
 		t, _ := time.Parse(time.RFC3339, *lastSeenS)
 		a.LastSeenAt = &t
 	}
-	return &a, secretHash, nil
+	return &a, rawSecret, nil
 }
 
 // ListAgents returns all agents ordered by registered_at.
 func (s *Store) ListAgents() ([]Agent, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, api_key, registered_at, last_seen_at, enabled
+		`SELECT id, name, api_key, registered_at, last_seen_at, enabled,
+		        COALESCE(binary_amd64,''), COALESCE(binary_arm64,''),
+		        COALESCE(processes,'[]'), COALESCE(track_os,1)
 		 FROM agents ORDER BY registered_at`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list agents: %w", err)
@@ -143,13 +182,16 @@ func (s *Store) ListAgents() ([]Agent, error) {
 		var a Agent
 		var registeredS string
 		var lastSeenS *string
-		var enabledInt int
+		var enabledInt, trackOSInt int
 		if err := rows.Scan(&a.ID, &a.Name, &a.APIKey,
-			&registeredS, &lastSeenS, &enabledInt); err != nil {
+			&registeredS, &lastSeenS, &enabledInt,
+			&a.BinaryAmd64, &a.BinaryArm64,
+			&a.ProcessesJSON, &trackOSInt); err != nil {
 			return nil, err
 		}
 		a.RegisteredAt, _ = time.Parse(time.RFC3339, registeredS)
 		a.Enabled = enabledInt == 1
+		a.TrackOS = trackOSInt == 1
 		if lastSeenS != nil {
 			t, _ := time.Parse(time.RFC3339, *lastSeenS)
 			a.LastSeenAt = &t
@@ -157,6 +199,17 @@ func (s *Store) ListAgents() ([]Agent, error) {
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
+}
+
+// UpdateAgent updates the process list and track_os flag for an existing agent.
+func (s *Store) UpdateAgent(id, processesJSON string, trackOS bool) error {
+	if processesJSON == "" || processesJSON == "null" {
+		processesJSON = "[]"
+	}
+	_, err := s.db.Exec(
+		`UPDATE agents SET processes = ?, track_os = ? WHERE id = ?`,
+		processesJSON, boolToInt(trackOS), id)
+	return err
 }
 
 // DeleteAgent removes an agent and cascades to its batches.
@@ -173,6 +226,23 @@ func (s *Store) TouchAgent(id string) {
 }
 
 // --- batches ---
+
+// HasRecentBatch reports whether any batch from agentID was received within
+// the last window duration. Used to deduplicate replay bursts.
+func (s *Store) HasRecentBatch(agentID string, window time.Duration) (bool, error) {
+	cutoff := time.Now().UTC().Add(-window).Format(time.RFC3339)
+	var exists int
+	err := s.db.QueryRow(
+		`SELECT EXISTS(
+		     SELECT 1 FROM metric_batches
+		     WHERE agent_id = ? AND received_at > ?
+		 )`, agentID, cutoff,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("store: has recent batch: %w", err)
+	}
+	return exists == 1, nil
+}
 
 // InsertBatch stores a received metric batch and triggers archival if needed.
 func (s *Store) InsertBatch(agentID string, capturedAt time.Time, sequence int64, buffered bool, payloadJSON string) error {
@@ -276,7 +346,7 @@ func QueryArchive(archivePath, agentID string, from, to time.Time, limit int) ([
 // --- helpers ---
 
 func scanBatches(rows *sql.Rows) ([]Batch, error) {
-	var batches []Batch
+	batches := make([]Batch, 0)
 	for rows.Next() {
 		b, err := scanOneBatch(rows)
 		if err != nil {
@@ -293,15 +363,16 @@ type scanner interface {
 
 func scanOneBatch(s scanner) (*Batch, error) {
 	var b Batch
-	var capturedS, receivedS string
+	var capturedS, receivedS, payloadStr string
 	var bufferedInt int
 	if err := s.Scan(&b.ID, &b.AgentID, &capturedS, &receivedS,
-		&b.Sequence, &bufferedInt, &b.Payload); err != nil {
+		&b.Sequence, &bufferedInt, &payloadStr); err != nil {
 		return nil, err
 	}
 	b.CapturedAt, _ = time.Parse(time.RFC3339, capturedS)
 	b.ReceivedAt, _ = time.Parse(time.RFC3339, receivedS)
 	b.Buffered = bufferedInt == 1
+	b.Payload = json.RawMessage(payloadStr)
 	return &b, nil
 }
 

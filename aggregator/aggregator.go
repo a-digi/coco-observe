@@ -20,8 +20,12 @@ import (
 
 // Config holds the aggregator's startup options.
 type Config struct {
-	// DataDir is where the hot SQLite database and archive files are stored.
+	// DataDir is where the hot SQLite database, archive files, and per-agent
+	// binaries are stored.
 	DataDir string
+	// AggregatorURL is the public push endpoint embedded into downloaded
+	// agent binaries, e.g. "https://coco-iam.example.com/api/v1/admin/observe/push".
+	AggregatorURL string
 }
 
 // Aggregator wires the store and handlers together.
@@ -59,9 +63,24 @@ func (a *Aggregator) QueryHandler() http.Handler {
 	return &handler.QueryHandler{Store: a.store, DataDir: a.cfg.DataDir}
 }
 
-// AgentsHandler manages agent records and credentials.
+// AgentsHandler manages agent records and per-agent binary generation.
 // Mount at basePath (requires observe:manage scope).
 // basePath must be the full path prefix, e.g. "/api/v1/admin/observe/agents".
-func (a *Aggregator) AgentsHandler(basePath string) http.Handler {
-	return &handler.AgentsHandler{Store: a.store, BasePath: basePath}
+// embeddedAmd64 / embeddedArm64 are the base Linux agent binaries embedded into
+// the server at build time (via //go:embed in the consuming package).
+func (a *Aggregator) AgentsHandler(basePath string, embeddedAmd64, embeddedArm64 []byte) http.Handler {
+	return &handler.AgentsHandler{
+		Store:         a.store,
+		BasePath:      basePath,
+		DataDir:       a.cfg.DataDir,
+		AggregatorURL: a.cfg.AggregatorURL,
+		EmbeddedAmd64: embeddedAmd64,
+		EmbeddedArm64: embeddedArm64,
+	}
+}
+
+// DownloadHandler serves stored per-agent binaries.
+// Mount at GET /…/observe/agents/{id}/download (requires observe:manage scope).
+func (a *Aggregator) DownloadHandler() http.Handler {
+	return &handler.AgentDownloadHandler{Store: a.store}
 }

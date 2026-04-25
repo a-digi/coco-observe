@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -66,6 +67,21 @@ func (h *ReceiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	capturedAt, err := time.Parse(time.RFC3339, batch.Timestamp)
 	if err != nil {
 		capturedAt = time.Now().UTC()
+	}
+
+	recent, err := h.Store.HasRecentBatch(agent.ID, 30*time.Second)
+	if err != nil {
+		jsonError(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	if recent {
+		log.Printf("observe: duplicate push from agent %s seq=%d — received within dedup window, ignored",
+			agent.ID, batch.Sequence)
+		h.Store.TouchAgent(agent.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+		return
 	}
 
 	if err := h.Store.InsertBatch(

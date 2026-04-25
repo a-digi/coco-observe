@@ -11,7 +11,11 @@ CREATE TABLE IF NOT EXISTS agents (
     api_secret       TEXT NOT NULL,
     registered_at    TEXT NOT NULL,
     last_seen_at     TEXT,
-    enabled          INTEGER NOT NULL DEFAULT 1
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    binary_amd64     TEXT,
+    binary_arm64     TEXT,
+    processes        TEXT NOT NULL DEFAULT '[]',
+    track_os         INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS metric_batches (
@@ -26,6 +30,23 @@ CREATE TABLE IF NOT EXISTS metric_batches (
 
 CREATE INDEX IF NOT EXISTS idx_batches_agent_time
     ON metric_batches(agent_id, captured_at);
+
+CREATE INDEX IF NOT EXISTS idx_batches_agent_received
+    ON metric_batches(agent_id, received_at);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent columns for existing databases that predate this migration.
+	for _, stmt := range []string{
+		`ALTER TABLE agents ADD COLUMN binary_amd64 TEXT`,
+		`ALTER TABLE agents ADD COLUMN binary_arm64 TEXT`,
+		`ALTER TABLE agents ADD COLUMN processes TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE agents ADD COLUMN track_os INTEGER NOT NULL DEFAULT 1`,
+	} {
+		_, _ = db.Exec(stmt)
+	}
+	// Drop the unique dedup index if it was created by a previous version.
+	_, _ = db.Exec(`DROP INDEX IF EXISTS idx_batches_dedup`)
+	return nil
 }

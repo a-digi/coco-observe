@@ -32,7 +32,15 @@ func New(url, apiKey, apiSecret string) *Pusher {
 		url:       url,
 		apiKey:    apiKey,
 		apiSecret: apiSecret,
-		client:    &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+			// Do not follow redirects — a 301/302 redirect would silently
+			// convert POST to GET, resulting in a 405 from the aggregator.
+			// If a redirect is returned, surface it as a clear error.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return fmt.Errorf("unexpected redirect to %s — check aggregator_url in config", req.URL)
+			},
+		},
 	}
 }
 

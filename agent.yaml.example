@@ -1,0 +1,27 @@
+# observe-agent configuration
+# Copy this file to agent.yaml and fill in the credentials generated
+# by the Observe > Agents panel in the coco-iam admin UI.
+
+# Credentials — generated when you register an agent in the UI.
+# The secret is shown only once at creation time.
+api_key: REPLACE_WITH_API_KEY
+api_secret: REPLACE_WITH_API_SECRET
+
+# Full URL of the push endpoint on your coco-iam installation.
+aggregator_url: https://coco-iam-api.example.com/api/v1/admin/observe/push
+
+# How often to collect and push metrics (default: 3 minutes).
+push_interval: 180s
+
+# Where to buffer batches if the push fails.
+# The agent retries them on the next successful connection.
+buffer_dir: /var/lib/observe-agent/buffer
+buffer_retention: 24h
+
+# Whether to collect host OS metrics (CPU, RAM, disk, network).
+track_os: true
+
+# Processes to monitor by name. The agent finds each process automatically
+# by scanning /proc and collects CPU %, RSS memory, and thread count.
+processes:
+  - name: coco-iam-api

@@ -1,0 +1,17 @@
+[Unit]
+Description=coco-observe agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/observe-agent
+ExecStart=/opt/observe-agent/observe-agent -config /opt/observe-agent/agent.yaml
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=observe-agent
+
+[Install]
+WantedBy=multi-user.target

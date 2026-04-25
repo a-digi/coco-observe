@@ -17,12 +17,12 @@ import (
 
 // Agent collects and pushes metrics on a schedule.
 type Agent struct {
-	cfg      *Config
-	os       *collector.OSCollector
-	runtimes []*collector.RuntimeCollector
-	buf      *buffer.Buffer
-	push     *pusher.Pusher
-	seq      atomic.Int64
+	cfg   *Config
+	os    *collector.OSCollector // nil when track_os is false
+	procs []*collector.ProcCollector
+	buf   *buffer.Buffer
+	push  *pusher.Pusher
+	seq   atomic.Int64
 }
 
 // New constructs an Agent from cfg. Returns an error if the buffer
@@ -33,23 +33,27 @@ func New(cfg *Config) (*Agent, error) {
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 
-	var runtimes []*collector.RuntimeCollector
+	var procs []*collector.ProcCollector
 	for _, p := range cfg.Processes {
-		runtimes = append(runtimes, collector.NewRuntimeCollector(p.ScrapeURL))
+		procs = append(procs, collector.NewProcCollector(p.Name))
+	}
+
+	var osCol *collector.OSCollector
+	if cfg.TrackOS {
+		osCol = collector.NewOSCollector()
 	}
 
 	return &Agent{
-		cfg:      cfg,
-		os:       collector.NewOSCollector(),
-		runtimes: runtimes,
-		buf:      buf,
-		push:     pusher.New(cfg.AggregatorURL, cfg.APIKey, cfg.APISecret),
+		cfg:   cfg,
+		os:    osCol,
+		procs: procs,
+		buf:   buf,
+		push:  pusher.New(cfg.AggregatorURL, cfg.APIKey, cfg.APISecret),
 	}, nil
 }
 
 // Run starts the collection+push loop. Blocks until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
-	// Replay any buffered batches from prior runs before the first live push.
 	a.replayBuffer()
 
 	ticker := time.NewTicker(a.cfg.PushInterval)
@@ -97,23 +101,24 @@ func (a *Agent) replayBuffer() {
 func (a *Agent) buildBatch(buffered bool) *payload.Batch {
 	seq := a.seq.Add(1)
 
-	osMetrics, err := a.os.Collect()
-	if err != nil {
-		log.Printf("observe agent: OS collect error: %v", err)
+	var osMetrics *payload.OSMetrics
+	if a.os != nil {
+		m, err := a.os.Collect()
+		if err != nil {
+			log.Printf("observe agent: OS collect error: %v", err)
+		} else {
+			osMetrics = &m
+		}
 	}
 
-	var procs []payload.ProcessMetrics
-	for i, rc := range a.runtimes {
-		name := a.cfg.Processes[i].Name
-		scrapeURL := a.cfg.Processes[i].ScrapeURL
-		rt, err := rc.Collect()
-		pm := payload.ProcessMetrics{Name: name, ScrapeURL: scrapeURL}
+	procs := make([]payload.ProcessMetrics, 0, len(a.procs))
+	for _, pc := range a.procs {
+		pm, err := pc.Collect()
 		if err != nil {
-			pm.ScrapeError = err.Error()
-		} else {
-			pm.Runtime = rt
+			log.Printf("observe agent: proc collect error: %v", err)
+			continue
 		}
-		procs = append(procs, pm)
+		procs = append(procs, *pm)
 	}
 
 	return &payload.Batch{

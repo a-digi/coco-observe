@@ -5,20 +5,19 @@ package payload
 
 // Batch is the JSON body the agent POSTs to the aggregator on every push.
 type Batch struct {
-	AgentID  string `json:"agent_id"`
+	AgentID string `json:"agent_id"`
 	// Timestamp is the UTC wall-clock time the metrics were captured (RFC 3339).
 	Timestamp string `json:"timestamp"`
 	// Sequence increments by one on every push from this agent.
-	// The aggregator uses it to detect gaps caused by buffered replays.
 	Sequence int64 `json:"sequence"`
 	// Buffered is true when this batch was stored locally and is being
 	// replayed after a prior push failure.
 	Buffered bool `json:"buffered"`
 
-	// OS holds machine-level metrics (one set per agent, not per process).
-	OS OSMetrics `json:"os"`
+	// OS holds machine-level metrics. Nil when the agent has track_os disabled.
+	OS *OSMetrics `json:"os"`
 
-	// Processes is one entry per monitored Go process on this machine.
+	// Processes is one entry per monitored process on this machine.
 	Processes []ProcessMetrics `json:"processes"`
 }
 
@@ -54,25 +53,21 @@ type NetMetrics struct {
 	TxErrors uint64 `json:"tx_errors"`
 }
 
-// ProcessMetrics covers one monitored Go process.
+// ProcessMetrics covers one monitored process, discovered by name via /proc.
 type ProcessMetrics struct {
-	// Name is the human label from the agent config (e.g. "coco-iam-api").
-	Name      string `json:"name"`
-	// ScrapeURL is the /debug/vars endpoint this data was scraped from.
-	ScrapeURL string `json:"scrape_url"`
-	// Runtime is nil when the process was unreachable at scrape time.
-	Runtime   *RuntimeMetrics `json:"runtime,omitempty"`
-	// ScrapeError is set when Runtime is nil.
-	ScrapeError string `json:"scrape_error,omitempty"`
-}
-
-// RuntimeMetrics holds Go runtime stats scraped from /debug/vars.
-type RuntimeMetrics struct {
-	HeapInUseBytes  uint64  `json:"heap_in_use_bytes"`
-	HeapAllocBytes  uint64  `json:"heap_alloc_bytes"`
-	HeapSysBytes    uint64  `json:"heap_sys_bytes"`
-	NumGC           uint32  `json:"num_gc"`
-	GCPauseLastMS   float64 `json:"gc_pause_last_ms"`
-	Goroutines      int64   `json:"goroutines"`
-	UptimeSeconds   int64   `json:"uptime_seconds"`
+	// Name is the process name from the agent config (e.g. "coco-iam-api").
+	Name string `json:"name"`
+	// PID is the discovered process ID. Zero when Found is false.
+	PID int `json:"pid,omitempty"`
+	// Found indicates whether the process was running at collection time.
+	Found bool `json:"found"`
+	// CPUPct is the CPU usage percentage since the last collection interval.
+	// May exceed 100% on multi-core systems.
+	CPUPct float64 `json:"cpu_pct"`
+	// RSSBytes is the resident set size in bytes.
+	RSSBytes uint64 `json:"rss_bytes"`
+	// Threads is the number of OS threads the process has.
+	Threads int `json:"threads"`
+	// Error is set when Found is true but reading stats failed.
+	Error string `json:"error,omitempty"`
 }
