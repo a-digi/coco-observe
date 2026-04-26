@@ -115,7 +115,11 @@ func (a *Agent) buildBatch(buffered bool) *payload.Batch {
 	for _, pc := range a.procs {
 		pm, err := pc.Collect()
 		if err != nil {
+			// Collect returns an error only for fatal I/O failures (e.g. /proc
+			// unreadable). Include the metric with the error set so the
+			// aggregator can surface it rather than silently dropping it.
 			log.Printf("observe agent: proc collect error: %v", err)
+			procs = append(procs, payload.ProcessMetrics{Name: pc.Name(), Error: err.Error()})
 			continue
 		}
 		procs = append(procs, *pm)

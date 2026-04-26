@@ -9,6 +9,8 @@ type ProcCollector struct{ name string }
 
 func NewProcCollector(name string) *ProcCollector { return &ProcCollector{name: name} }
 
+func (c *ProcCollector) Name() string { return c.name }
+
 func (c *ProcCollector) Collect() (*payload.ProcessMetrics, error) {
 	return &payload.ProcessMetrics{
 		Name:  c.name,

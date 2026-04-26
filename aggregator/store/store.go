@@ -263,6 +263,51 @@ func (s *Store) InsertBatch(agentID string, capturedAt time.Time, sequence int64
 	return nil
 }
 
+// BatchPage is a paginated result for raw batch queries.
+type BatchPage struct {
+	Total int     `json:"total"`
+	Page  int     `json:"page"`
+	Limit int     `json:"limit"`
+	Items []Batch `json:"items"`
+}
+
+// QueryBatchesPaginated returns one page of batches for agentID in [from, to], newest first.
+func (s *Store) QueryBatchesPaginated(agentID string, from, to time.Time, page, limit int) (BatchPage, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if page < 0 {
+		page = 0
+	}
+	fromS := from.UTC().Format(time.RFC3339)
+	toS := to.UTC().Format(time.RFC3339)
+
+	var total int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM metric_batches WHERE agent_id = ? AND captured_at BETWEEN ? AND ?`,
+		agentID, fromS, toS,
+	).Scan(&total); err != nil {
+		return BatchPage{}, fmt.Errorf("store: count page: %w", err)
+	}
+
+	rows, err := s.db.Query(
+		`SELECT id, agent_id, captured_at, received_at, sequence, buffered, payload
+		 FROM metric_batches
+		 WHERE agent_id = ? AND captured_at BETWEEN ? AND ?
+		 ORDER BY captured_at DESC LIMIT ? OFFSET ?`,
+		agentID, fromS, toS, limit, page*limit,
+	)
+	if err != nil {
+		return BatchPage{}, fmt.Errorf("store: query page: %w", err)
+	}
+	defer rows.Close()
+	items, err := scanBatches(rows)
+	if err != nil {
+		return BatchPage{}, err
+	}
+	return BatchPage{Total: total, Page: page, Limit: limit, Items: items}, nil
+}
+
 // QueryBatches returns batches for agentID in [from, to], newest first.
 func (s *Store) QueryBatches(agentID string, from, to time.Time, limit int) ([]Batch, error) {
 	if limit <= 0 {
